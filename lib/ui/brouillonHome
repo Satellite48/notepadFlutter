@@ -1,0 +1,598 @@
+import 'package:flutter/material.dart';
+import 'package:notepad/ui/profil_popup.dart';
+import '../data/repository/note_repository.dart';
+import '../data/repository/category_repository.dart';
+import '../model/note.dart';
+import '../service/auth_service.dart';
+import 'archive_note_page.dart';
+import 'filtre_page.dart';
+import 'note_card.dart';
+import 'note_detail_page.dart';
+import 'add_note_page.dart';
+
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
+
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+  //proprietes
+  final NoteRepository _noteRepository = NoteRepository();
+  final CategoryRepository _categoryRepository = CategoryRepository();
+  final AuthService _authService = AuthService();
+  final TextEditingController _searchController = TextEditingController();
+  final FocusNode _searchFocusNode = FocusNode();
+  List<Note> _notes = [];
+  List<Note> _filteredNotes = [];
+  final int count = 0;
+  Map<int, String> _categoryNames = {};
+  String? _selectedFilter;
+
+  // Pour la pagination
+  int _currentPage = 0;
+  final int _notesPerPage = 5;
+  bool _isLoading = false;
+  bool _hasMoreNotes = true;
+  final ScrollController _scrollController = ScrollController();
+
+  //charger les notes rechercher
+  @override
+  void initState() {
+    super.initState();
+    _loadNotes();
+    _searchController.addListener(_filterNotes);
+    //si l'utilisateur a atteint le bas de l'ecran
+    _scrollController.addListener(_scrollListener);
+  }
+
+  // Méthode pour détecter le défilement jusqu'en bas
+  void _scrollListener() {
+    if (_scrollController.position.pixels >=
+            _scrollController.position.maxScrollExtent - 200 &&
+        !_isLoading &&
+        _hasMoreNotes) {
+      _loadMoreNotes();
+    }
+  }
+
+  // Charge les notes paginées pour l'utilisateur connecté et met à jour l'état de l'interface.
+  // Réinitialise la liste des notes et récupère les catégories associées.
+  // Affiche une notification en cas d'erreur d'authentification.
+  Future<void> _loadNotes() async {
+    setState(() {
+      _isLoading = true;
+      _currentPage = 0;
+      _hasMoreNotes = true;
+      _notes = []; // Réinitialiser les notes
+    });
+    final userId = await _authService.getCurrentUserId();
+    if (userId != null) {
+      // Charger la première page des notes
+      final notes = await _noteRepository.getPaginatedNotes(
+        userId.toString(),
+        _currentPage,
+        _notesPerPage,
+        includeArchived: false,
+      );
+
+      // Déterminer s'il y a plus de notes à charger
+      _hasMoreNotes = notes.length == _notesPerPage;
+
+      // Récupérer les catégories
+      final categories = await _categoryRepository.getAllCategories(
+        userId.toString(),
+      );
+
+      setState(() {
+        _notes = notes..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+        _categoryNames = {for (var cat in categories) cat.id!: cat.name};
+        _filterNotes();
+        _isLoading = false;
+      });
+    } else {
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  // Charger plus de notes (pagination)
+  Future<void> _loadMoreNotes() async {
+    if (_isLoading || !_hasMoreNotes) return;
+
+    setState(() {
+      _isLoading = true;
+    });
+
+    final userId = await _authService.getCurrentUserId();
+    if (userId != null) {
+      _currentPage++;
+
+      final moreNotes = await _noteRepository.getPaginatedNotes(
+        userId.toString(),
+        _currentPage,
+        _notesPerPage,
+        includeArchived: false,
+      );
+
+      // Déterminer s'il y a encore plus de notes à charger
+      _hasMoreNotes = moreNotes.length == _notesPerPage;
+
+      setState(() {
+        _notes.addAll(moreNotes);
+        _notes.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+        _filterNotes();
+        _isLoading = false;
+      });
+    } else {
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  //filtrer les notes e,n fonction du text de recherche et du filtre
+  void _filterNotes() {
+    final query = _searchController.text;
+    setState(() {
+      _filteredNotes = filterNotes(
+        notes: _notes,
+        query: query,
+        selectedFilter: _selectedFilter,
+      );
+    });
+  }
+
+  //voir les notes filtrer
+  void _showFilterOptionsFromExternal() {
+    showFilterOptions(
+      context: context,
+      selectedFilter: _selectedFilter,
+      onFilterSelected: (filter) {
+        setState(() {
+          _selectedFilter = filter;
+          _filterNotes();
+        });
+      },
+    );
+  }
+
+  //convertir le type de note en 0.1.2
+  int _mapPriorityToType(String priority) {
+    switch (priority) {
+      case 'Important':
+        return 1;
+      case 'Urgent':
+        return 2;
+      default:
+        return 0;
+    }
+  }
+
+  Future<void> _archiveNote(Note note) async {
+    try {
+      final updatedNote = Note(
+        id: note.id,
+        title: note.title,
+        content: note.content,
+        categoryId: note.categoryId,
+        priority: note.priority,
+        userId: note.userId,
+        createdAt: note.createdAt,
+        isFavorite: note.isFavorite,
+        isArchived: true, // Archiver la note
+      );
+
+      await _noteRepository.updateNote(updatedNote);
+
+      // Afficher une confirmation
+      // Afficher une confirmation pour vois si la note est archivee ou pas
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Note archivée'),
+          backgroundColor: Colors.blueAccent,
+        ),
+      );
+
+      await _loadNotes();
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Erreur lors de l\'archivage: $e')),
+      );
+    }
+  }
+
+  //note favoris
+  Future<void> _toggleFavorite(Note note) async {
+    final updatedNote = Note(
+      id: note.id,
+      title: note.title,
+      content: note.content,
+      categoryId: note.categoryId,
+      priority: note.priority,
+      userId: note.userId,
+      createdAt: note.createdAt,
+      isFavorite: !note.isFavorite,
+      isArchived: note.isArchived,
+    );
+    await _noteRepository.updateNote(updatedNote);
+    await _loadNotes();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text(
+          'Mes Notes',
+          style: TextStyle(
+            fontSize: 30,
+            fontWeight: FontWeight.bold,
+            color: Colors.white,
+          ),
+        ),
+        backgroundColor: Colors.blueAccent,
+        elevation: 4,
+        centerTitle: false,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(bottom: Radius.circular(15)),
+        ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.account_circle, color: Colors.white),
+            onPressed: () async {
+              final lastname = await _authService.getCurrentUserLastname();
+              final firstname = await _authService.getCurrentUserFirstname();
+              final email = await _authService.getCurrentUserEmail();
+              showProfilePopup(context, lastname, firstname, email);
+            },
+          ),
+        ],
+      ),
+      body: GestureDetector(
+        onTap: () => _searchFocusNode.unfocus(),
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Row(
+                children: [
+                  Expanded(
+                    flex: 4,
+                    //champs de recherche
+                    child: TextField(
+                      controller: _searchController,
+                      focusNode: _searchFocusNode,
+                      decoration: InputDecoration(
+                        hintText: 'Rechercher des notes...',
+                        prefixIcon: const Icon(Icons.search),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        filled: true,
+                        fillColor: Colors.grey[200],
+                        contentPadding: const EdgeInsets.symmetric(
+                          vertical: 12,
+                          horizontal: 16,
+                        ),
+                      ),
+                      onChanged: (value) => _filterNotes(),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    flex: 1,
+                    //filtre
+                    child: IconButton(
+                      icon: const Icon(Icons.filter_list),
+                      style: IconButton.styleFrom(
+                        backgroundColor: Colors.blueAccent,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.all(16),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      onPressed: () => _showFilterOptionsFromExternal(),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child:
+                  _filteredNotes.isEmpty
+                      ? const Center(child: Text('Aucune note trouvée'))
+                      : ListView.builder(
+                        controller: _scrollController,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 8,
+                        ),
+                        itemCount: _filteredNotes.length,
+                        itemBuilder: (context, index) {
+                          // Afficher l'indicateur de chargement au dernier élément si on a plus de notes
+                          if (index == _filteredNotes.length) {
+                            return Center(
+                              child: Padding(
+                                padding: const EdgeInsets.all(8.0),
+                                child: CircularProgressIndicator(),
+                              ),
+                            );
+                          }
+
+                          final note = _filteredNotes[index];
+
+                          // Utilisation de Dismissible pour l'animation de swipe
+                          return Dismissible(
+                            key: Key(note.id.toString()),
+                            direction:
+                                DismissDirection
+                                    .startToEnd, // Glissement de gauche à droite seulement
+                            background: Container(
+                              color: Colors.blue.shade100,
+                              alignment: Alignment.centerLeft,
+                              padding: const EdgeInsets.only(left: 20.0),
+                              child: const Icon(
+                                Icons.archive,
+                                color: Colors.blueAccent,
+                                size: 32.0,
+                              ),
+                            ),
+                            confirmDismiss: (direction) async {
+                              if (direction == DismissDirection.startToEnd) {
+                                // Afficher un message pour confirmer l'action
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Note archivée'),
+                                    backgroundColor: Colors.blueAccent,
+                                    duration: Duration(seconds: 1),
+                                  ),
+                                );
+
+                                // Archiver la note
+                                await _archiveNote(note);
+                                return true;
+                              }
+                              return false;
+                            },
+                            child: NoteCard(
+                              title: note.title,
+                              content: note.content,
+                              type: _mapPriorityToType(note.priority),
+                              date: note.createdAt,
+                              isFavorite: note.isFavorite,
+                              category:
+                                  _categoryNames[note.categoryId] ?? 'Inconnue',
+                              onTap: () {
+                                _searchFocusNode.unfocus();
+                                Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder:
+                                        (context) => NoteDetailPage(note: note),
+                                  ),
+                                );
+                              },
+                              //click sur favoris
+                              onStarPressed: () => _toggleFavorite(note),
+                              //editer
+                              onEditPressed: () {
+                                _searchFocusNode.unfocus();
+                                Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder:
+                                        (context) => AddNotePage(note: note),
+                                  ),
+                                ).then((_) => _loadNotes());
+                              },
+                              //archivage
+                              onArchivePressed: () async {
+                                final confirmed = await showDialog<bool>(
+                                  context: context,
+                                  builder:
+                                      (context) => AlertDialog(
+                                        title: const Text(
+                                          'Confirmer l\'archivage',
+                                        ),
+                                        content: const Text(
+                                          'Voulez-vous archiver cette note ?',
+                                        ),
+                                        actions: [
+                                          TextButton(
+                                            onPressed:
+                                                () => Navigator.pop(
+                                                  context,
+                                                  false,
+                                                ),
+                                            child: const Text('Annuler'),
+                                          ),
+                                          TextButton(
+                                            onPressed:
+                                                () => Navigator.pop(
+                                                  context,
+                                                  true,
+                                                ),
+                                            child: const Text('Archiver'),
+                                          ),
+                                        ],
+                                      ),
+                                );
+
+                                if (confirmed == true) {
+                                  await _archiveNote(note);
+                                }
+                              },
+                              //supprimer
+                              onDeletePressed: () async {
+                                final confirmed = await showDialog<bool>(
+                                  context: context,
+                                  builder:
+                                      (context) => AlertDialog(
+                                        title: const Text(
+                                          'Confirmer la suppression',
+                                        ),
+                                        content: const Text(
+                                          'Voulez-vous vraiment supprimer cette note ?',
+                                        ),
+                                        actions: [
+                                          TextButton(
+                                            onPressed:
+                                                () => Navigator.pop(
+                                                  context,
+                                                  false,
+                                                ),
+                                            child: const Text('Annuler'),
+                                          ),
+                                          TextButton(
+                                            onPressed:
+                                                () => Navigator.pop(
+                                                  context,
+                                                  true,
+                                                ),
+                                            child: const Text(
+                                              'Supprimer',
+                                              style: TextStyle(
+                                                color: Colors.red,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                );
+
+                                if (confirmed != true)
+                                  return; // Arrêt si l'utilisateur annule
+
+                                if (note.id == null) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text('ID de note manquant'),
+                                    ),
+                                  );
+                                  return;
+                                }
+
+                                try {
+                                  final result = await _noteRepository
+                                      .deleteNote(note.id!);
+                                  if (result > 0) {
+                                    _loadNotes();
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        content: Text(
+                                          'Note supprimée avec succès',
+                                        ),
+                                        backgroundColor: Colors.red,
+                                      ),
+                                    );
+                                  } else {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        content: Text(
+                                          'Aucune note trouvée avec cet ID',
+                                        ),
+                                      ),
+                                    );
+                                  }
+                                } catch (e) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text('Erreur: ${e.toString()}'),
+                                    ),
+                                  );
+                                }
+                              },
+                            ),
+                          );
+                        },
+                      ),
+            ),
+          ],
+        ),
+      ),
+
+      //button ajout de note
+      floatingActionButton: Padding(
+        padding: const EdgeInsets.only(bottom: 30.0, right: 20.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            FloatingActionButton(
+              onPressed: () async {
+                final result = await Navigator.push(
+                  context,
+                  PageRouteBuilder(
+                    pageBuilder:
+                        (context, animation, secondaryAnimation) =>
+                            const ArchivedNotesPage(),
+                    transitionsBuilder: (
+                      context,
+                      animation,
+                      secondaryAnimation,
+                      child,
+                    ) {
+                      const begin = Offset(1.0, 0.0);
+                      const end = Offset.zero;
+                      const curve = Curves.easeInOut;
+                      var tween = Tween(
+                        begin: begin,
+                        end: end,
+                      ).chain(CurveTween(curve: curve));
+                      return SlideTransition(
+                        position: animation.drive(tween),
+                        child: child,
+                      );
+                    },
+                  ),
+                );
+                if (result == true) {
+                  await _loadNotes(); // Recharger les notes si une modification a été faite
+                }
+              },
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              backgroundColor: Colors.blueAccent,
+              foregroundColor: Colors.white,
+              mini: true,
+              tooltip: 'Notes archivées',
+              child: const Icon(Icons.archive, size: 24),
+            ),
+            const SizedBox(height: 16),
+            FloatingActionButton(
+              onPressed: () async {
+                final result = await Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const AddNotePage()),
+                );
+                if (result == true) {
+                  await _loadNotes();
+                }
+              },
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              backgroundColor: Colors.blueAccent,
+              foregroundColor: Colors.white,
+              child: const Icon(Icons.edit_note, size: 32),
+            ),
+          ],
+        ),
+      ),
+      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
+    );
+  }
+
+  //liberer les ressourses utilise par le widgets
+  @override
+  void dispose() {
+    _searchController.dispose();
+    _searchFocusNode.dispose();
+    _scrollController.dispose();
+    super.dispose();
+  }
+}
